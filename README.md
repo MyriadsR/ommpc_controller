@@ -40,6 +40,7 @@ git clone --recursive -b release-0.6.3 https://github.com/osqp/osqp.git
 If the clone process completes without any errors, proceed directly to the next step. Otherwise, you can consider the following command:
 
 ```bash
+cd osqp
 git submodule update --init --recursive
 ```
 
@@ -129,7 +130,6 @@ There are three ways to set the reference trajectory and control inputs:
 We adopt Hopf fibration to calculate the full state from the flat outputs.
 
 **Related parameters**:  
-mpc_enabled: Whether to enable NMPC control  
 use_fix_yaw: Whether to fix the yaw angle   
 use_trajectory_ending_pos: Whether to ensure reaching the trajectory endpoint, generally set to `true`  
 MPC_params:  
