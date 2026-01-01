@@ -15,6 +15,18 @@
 
 <!-- /TOC -->
 
+If you feel my work has been helpful, please give it a star—thank you!
+
+Also, the control performance is not yet optimal, so if anyone is interested in helping with debugging and parameter tuning, I would be greatly appreciated!
+
+Simulation with Gazebo and EGO-Planner-V2:
+
+![Simulation with Gazebo and EGO-Planner-V2](misc/simu_with_ego.gif)
+
+Error analysis of realworld experiment with a Fast-Drone-250 quadrotor:
+
+![Error analysis of realworld experiment with a Fast-Drone-250 quadrotor](misc/real_flight.png)
+
 ## Usage
 
 ### Installing OSQP
