@@ -256,8 +256,8 @@ public:
     // variables: [δx0, δu0, δx1, δu1, ..., δx{nstep-1}, δu{nstep-1}, δx{nstep}]
     total_vars_ = (nstep + 1) * nx + nstep * nu;
 
-    // constraints: error dynamics (nstep) + init (1) + control bounds (2*nstep)
-    total_constraints_ = nstep * nx + nx + 2 * nstep * nu;
+    // constraints: error dynamics (nstep) + init (1) + control bounds (nstep)
+    total_constraints_ = nstep * nx + nx + nstep * nu;
   }
 
   ~MpcWrapper()
@@ -373,9 +373,9 @@ public:
       P_indptr_[col] = col;
     }
 
-    // Fill in δxk part (k = 0,...,nstep-1)
     for (int k = 0; k < nstep; ++k)
     {
+      // δxk part
       double state_decay = std::exp(-(double)k / (double)nstep * state_cost_exponential);
       for (int i = 0; i < nx; ++i)
       {
