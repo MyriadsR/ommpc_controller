@@ -420,7 +420,7 @@ public:
     }
 
     // non-zero elements of control constraint (each constraint has 1 non-zero element)
-    A_nnz_ += 2 * nstep * nu;
+    A_nnz_ += nstep * nu;
 
     // Allocate memory
     A_data_ = (c_float *)malloc(A_nnz_ * sizeof(c_float));
@@ -481,14 +481,6 @@ public:
     {
       int uk_offset = k * (nx + nu) + nx;
 
-      // Lower bound constraints
-      for (int i = 0; i < nu; ++i)
-      {
-        int col = uk_offset + i;
-        col_nnz[col]++;
-      }
-
-      // Upper bound constraints
       for (int i = 0; i < nu; ++i)
       {
         int col = uk_offset + i;
@@ -573,17 +565,6 @@ public:
     {
       int uk_offset = k * (nx + nu) + nx;
 
-      // 下界约束
-      for (int i = 0; i < nu; ++i)
-      {
-        int col = uk_offset + i;
-        int pos = A_indptr_[col] + col_pos[col];
-        temp_data[pos] = 1.0;
-        temp_indices[pos] = constraint_idx++;
-        col_pos[col]++;
-      }
-
-      // 上界约束
       for (int i = 0; i < nu; ++i)
       {
         int col = uk_offset + i;
@@ -617,18 +598,9 @@ public:
     offset += nstep * nx;
     for (int k = 0; k < nstep; ++k)
     {
-      // Lower bound constraints
       for (int i = 0; i < nu; ++i)
       {
         l_[offset] = u_min[k][i];
-        u_[offset] = OSQP_INFTY;
-        offset++;
-      }
-
-      // Upper bound constraints
-      for (int i = 0; i < nu; ++i)
-      {
-        l_[offset] = -OSQP_INFTY;
         u_[offset] = u_max[k][i];
         offset++;
       }
