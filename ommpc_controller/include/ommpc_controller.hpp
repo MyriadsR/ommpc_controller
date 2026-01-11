@@ -351,6 +351,7 @@ public:
   }
 
   // Set weight matrix, only once
+  // 这里设置的权重有衰减因子，如果想要恒定权重，可以设置衰减因子为0
   void buildHessianMatrix(
       const Eigen::Matrix<double, nx, nx> &Q_diag,
       const Eigen::Matrix<double, nu, nu> &R_diag,
@@ -361,9 +362,9 @@ public:
     // Hessian matrix is diagonal, directly construct CSC format
     P_nnz_ = total_vars_;
 
-    P_data_ = (c_float *)malloc(P_nnz_ * sizeof(c_float));
-    P_indices_ = (c_int *)malloc(P_nnz_ * sizeof(c_int));
-    P_indptr_ = (c_int *)malloc((total_vars_ + 1) * sizeof(c_int));
+    P_data_ = (c_float *)malloc(P_nnz_ * sizeof(c_float));  // 非零元素的值
+    P_indices_ = (c_int *)malloc(P_nnz_ * sizeof(c_int));   // 非零元素的行索引
+    P_indptr_ = (c_int *)malloc((total_vars_ + 1) * sizeof(c_int));  // 第j列的起始位置索引
 
     int var_idx = 0;
 
@@ -411,8 +412,14 @@ public:
       const std::vector<Eigen::SparseMatrix<double>> Fu)
   {
     // Calculate the number of non-zero elements
+    // 阶段1：统计非零元素
     A_nnz_ = nx; // Initial condition constraints
 
+    /*
+    Fx[k].nonZeros(): Fx矩阵的非零元素（约27个）
+    Fu[k].nonZeros(): Fu矩阵的非零元素（约12个）
+    nx: 单位矩阵 I 的对角元素（9个）
+    */
     // non-zero elements of dynamics constraints
     for (int k = 0; k < nstep; ++k)
     {
@@ -420,6 +427,7 @@ public:
     }
 
     // non-zero elements of control constraint (each constraint has 1 non-zero element)
+    // 每个控制变量有上下界两个约束，每个约束1个非零元素
     A_nnz_ += 2 * nstep * nu;
 
     // Allocate memory
@@ -428,6 +436,7 @@ public:
     A_indptr_ = (c_int *)malloc((total_vars_ + 1) * sizeof(c_int));
 
     // Initialize column pointers
+    // 阶段2: 按列统计非零元素数
     std::vector<int> col_nnz(total_vars_, 0);
 
     // First, count non-zero elements per column
@@ -442,11 +451,12 @@ public:
     int constraint_idx = nx;
     for (int k = 0; k < nstep; ++k)
     {
-      int xk_offset = k * (nx + nu);
-      int uk_offset = xk_offset + nx;
-      int xkp1_offset = (k + 1) * (nx + nu);
+      int xk_offset = k * (nx + nu);  // δxk的起始位置
+      int uk_offset = xk_offset + nx; // δuk的起始位置
+      int xkp1_offset = (k + 1) * (nx + nu);  // δx{k+1}的起始位置
 
       // -Fx[k] part (corresponding to δxk)
+      // 遍历 Fx[k] 的每个非零元素，为对应的 δxk 列增加计数
       for (int j = 0; j < Fx[k].outerSize(); ++j)
       {
         for (Eigen::SparseMatrix<double>::InnerIterator it(Fx[k], j); it; ++it)
@@ -477,6 +487,7 @@ public:
     }
 
     // Control constraints
+    // 每个控制变量有上下界两个约束，每个约束1个非零元素
     for (int k = 0; k < nstep; ++k)
     {
       int uk_offset = k * (nx + nu) + nx;
@@ -497,6 +508,7 @@ public:
     }
 
     // Set column pointers
+    // A_indptr_[col] 表示第col列的非零元素在数据数组中的起始位置
     A_indptr_[0] = 0;
     for (int col = 0; col < total_vars_; ++col)
     {
@@ -504,10 +516,12 @@ public:
     }
 
     // Then, fill in data
-    std::vector<int> col_pos(total_vars_, 0);
-    std::vector<c_float> temp_data(A_nnz_);
-    std::vector<c_int> temp_indices(A_nnz_);
+    // 阶段3: 填充数据
+    std::vector<int> col_pos(total_vars_, 0); // 每列当前填充位置
+    std::vector<c_float> temp_data(A_nnz_);   // 临时存储值
+    std::vector<c_int> temp_indices(A_nnz_);  // 临时存储行索引
 
+    // col_pos 跟踪每列已填充的非零元素数量
     // Reset constraint index
     constraint_idx = 0;
 
@@ -529,6 +543,14 @@ public:
       int xkp1_offset = (k + 1) * (nx + nu);
 
       // -Fx[k]
+      /*
+      - it(Fx[k], j) 创建一个迭代器，遍历稀疏矩阵 Fx[k] 的第 j 列的所有非零元素
+      - it 作为条件：当迭代器有效时为 true，遍历完该列所有非零元素后为 false
+      - ++it 移动到该列的下一个非零元素
+      - it.col() - 获取当前元素的列索引 (这里始终是 j)
+      - it.row() - 获取当前元素的行索引
+      - it.value() - 获取当前元素的值
+      */
       for (int j = 0; j < Fx[k].outerSize(); ++j)
       {
         for (Eigen::SparseMatrix<double>::InnerIterator it(Fx[k], j); it; ++it)
@@ -536,6 +558,7 @@ public:
           int col = xk_offset + it.col();
           int pos = A_indptr_[col] + col_pos[col];
           temp_data[pos] = -it.value();
+          // constraint_idx + it.row() 存储行索引
           temp_indices[pos] = constraint_idx + it.row();
           col_pos[col]++;
         }
@@ -595,6 +618,7 @@ public:
     }
 
     // Copy to OSQP arrays
+    // 将临时数组拷贝到OSQP要求的C风格数组
     memcpy(A_data_, temp_data.data(), A_nnz_ * sizeof(c_float));
     memcpy(A_indices_, temp_indices.data(), A_nnz_ * sizeof(c_int));
   }
@@ -847,11 +871,11 @@ public:
     timing_feedback_ = 0.0;
   }
 
-  void computeFlatInputwithHopfFibration(const Eigen::Vector3d &thr_acc,
+  void computeFlatInputwithHopfFibration(const Eigen::Vector3d &thr_acc,  // 期望加速度向量 (包含重力补偿)
                                   const Eigen::Vector3d &jer,
                                   const double &yaw,
-                                  const double &yawd,
-                                  const Eigen::Quaterniond &att_est,
+                                  const double &yawd,       // 期望偏航角速度
+                                  const Eigen::Quaterniond &att_est,  // 估计姿态 (奇异性时的备用值)
                                   Eigen::Quaterniond &att,
                                   Eigen::Vector3d &omg) const
   {
@@ -939,11 +963,11 @@ public:
   }
 
   void setStateMatricesandBounds(
-                const int i,
-                const Eigen::Quaterniond &q,
-                const Eigen::Vector3d &omg,
-                const double t_step,
-                const double thracc)
+                const int i,                  // 预测步索引 (0 ~ nstep-1)
+                const Eigen::Quaterniond &q,  // 参考姿态四元数
+                const Eigen::Vector3d &omg,     // 参考角速度
+                const double t_step,          // 时间步长
+                const double thracc)          // 参考推力加速度
   {
     Fx[i] = Eigen::SparseMatrix<double>(nx, nx);
     Fu[i] = Eigen::SparseMatrix<double>(nx, nu);
@@ -1034,12 +1058,17 @@ public:
     thracc = gravity_;
     Eigen::Quaterniond identity_q(1, 0, 0, 0), q;
     Eigen::Vector3d omg;
+    
     // des_acc, des_jerk, des_yaw, des_yawdot, des_q (when fail to calculate proper q), out_q, out_omg
     computeFlatInputwithHopfFibration(des_acc_in_world, Eigen::Vector3d::Zero(), yaw, 0, identity_q, q, omg);
     double t_step = param_.step_T;
     for (int i = 0; i < nstep; ++i)
     {
       setStateMatricesandBounds(i, q, omg, t_step, thracc);
+      
+      ROS_INFO_THROTTLE(2.0, "Ref step %d: omg = [%f, %f, %f], yaw = %f, thracc = %f",
+                        i,
+                        omg(0), omg(1), omg(2), yaw, thracc);
     }
     mpc_wrapper_.buildConstraintMatrix(Fx, Fu);
     mpc_wrapper_.buildConstraintVectors(u_lb, u_ub);
@@ -1144,6 +1173,10 @@ public:
       body_z = q.toRotationMatrix() * Eigen::Vector3d(0, 0, 1);
       
       setStateMatricesandBounds(i, q, omg, t_step, thracc);
+
+      // ROS_INFO_THROTTLE(2.0, "Ref step %d: omg = [%f, %f, %f], yaw = %f, thracc = %f", 
+      //                   i,
+      //                   omg(0), omg(1), omg(2), yaw, thracc);
     }
     mpc_wrapper_.buildConstraintMatrix(Fx, Fu);
     mpc_wrapper_.buildConstraintVectors(u_lb, u_ub);
