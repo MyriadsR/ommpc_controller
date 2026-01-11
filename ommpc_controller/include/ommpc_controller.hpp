@@ -256,8 +256,8 @@ public:
     // variables: [δx0, δu0, δx1, δu1, ..., δx{nstep-1}, δu{nstep-1}, δx{nstep}]
     total_vars_ = (nstep + 1) * nx + nstep * nu;
 
-    // constraints: error dynamics (nstep) + init (1) + control bounds (2*nstep)
-    total_constraints_ = nstep * nx + nx + 2 * nstep * nu;
+    // constraints: error dynamics (nstep) + init (1) + control bounds (nstep)
+    total_constraints_ = nstep * nx + nx + nstep * nu;
   }
 
   ~MpcWrapper()
@@ -374,9 +374,9 @@ public:
       P_indptr_[col] = col;
     }
 
-    // Fill in δxk part (k = 0,...,nstep-1)
     for (int k = 0; k < nstep; ++k)
     {
+      // δxk part
       double state_decay = std::exp(-(double)k / (double)nstep * state_cost_exponential);
       for (int i = 0; i < nx; ++i)
       {
@@ -427,8 +427,7 @@ public:
     }
 
     // non-zero elements of control constraint (each constraint has 1 non-zero element)
-    // 每个控制变量有上下界两个约束，每个约束1个非零元素
-    A_nnz_ += 2 * nstep * nu;
+    A_nnz_ += nstep * nu;
 
     // Allocate memory
     A_data_ = (c_float *)malloc(A_nnz_ * sizeof(c_float));
@@ -492,14 +491,6 @@ public:
     {
       int uk_offset = k * (nx + nu) + nx;
 
-      // Lower bound constraints
-      for (int i = 0; i < nu; ++i)
-      {
-        int col = uk_offset + i;
-        col_nnz[col]++;
-      }
-
-      // Upper bound constraints
       for (int i = 0; i < nu; ++i)
       {
         int col = uk_offset + i;
@@ -596,17 +587,6 @@ public:
     {
       int uk_offset = k * (nx + nu) + nx;
 
-      // 下界约束
-      for (int i = 0; i < nu; ++i)
-      {
-        int col = uk_offset + i;
-        int pos = A_indptr_[col] + col_pos[col];
-        temp_data[pos] = 1.0;
-        temp_indices[pos] = constraint_idx++;
-        col_pos[col]++;
-      }
-
-      // 上界约束
       for (int i = 0; i < nu; ++i)
       {
         int col = uk_offset + i;
@@ -641,18 +621,9 @@ public:
     offset += nstep * nx;
     for (int k = 0; k < nstep; ++k)
     {
-      // Lower bound constraints
       for (int i = 0; i < nu; ++i)
       {
         l_[offset] = u_min[k][i];
-        u_[offset] = OSQP_INFTY;
-        offset++;
-      }
-
-      // Upper bound constraints
-      for (int i = 0; i < nu; ++i)
-      {
-        l_[offset] = -OSQP_INFTY;
         u_[offset] = u_max[k][i];
         offset++;
       }
@@ -1065,7 +1036,7 @@ public:
     for (int i = 0; i < nstep; ++i)
     {
       setStateMatricesandBounds(i, q, omg, t_step, thracc);
-      
+
       ROS_INFO_THROTTLE(2.0, "Ref step %d: omg = [%f, %f, %f], yaw = %f, thracc = %f",
                         i,
                         omg(0), omg(1), omg(2), yaw, thracc);
