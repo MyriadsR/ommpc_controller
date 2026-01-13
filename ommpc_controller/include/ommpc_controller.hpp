@@ -694,8 +694,8 @@ struct Parameter_t
 {
   double step_T;
   double hover_percent;
-  double Q_pos_xy, Q_pos_z, Q_velocity, Q_attitude_rp, Q_attitude_yaw;
-  double R_thrust, R_pitchroll, R_yaw;
+  double Q_pos_x, Q_pos_y, Q_pos_z, Q_velocity, Q_attitude_roll, Q_attitude_pitch, Q_attitude_yaw;
+  double R_thrust, R_roll, R_pitch, R_yaw;
   double state_cost_exponential, input_cost_exponential;
   double max_bodyrate_xy, max_bodyrate_z, min_thrust, max_thrust;
 
@@ -820,11 +820,11 @@ public:
 
     // set gains
     Eigen::Matrix<double, nx, nx> Q = (Eigen::Matrix<double, nx, 1>() 
-      << param_.Q_pos_xy, param_.Q_pos_xy, param_.Q_pos_z,
+      << param_.Q_pos_x, param_.Q_pos_y, param_.Q_pos_z,
         param_.Q_velocity, param_.Q_velocity, param_.Q_velocity,
-        param_.Q_attitude_rp, param_.Q_attitude_rp, param_.Q_attitude_yaw).finished().asDiagonal();
+        param_.Q_attitude_roll, param_.Q_attitude_pitch, param_.Q_attitude_yaw).finished().asDiagonal();
     Eigen::Matrix<double, nu, nu> R = (Eigen::Matrix<double, nu, 1>()  
-      << param_.R_thrust, param_.R_pitchroll, param_.R_pitchroll, param_.R_yaw).finished().asDiagonal();
+      << param_.R_thrust, param_.R_roll, param_.R_pitch, param_.R_yaw).finished().asDiagonal();
 
     mpc_wrapper_.buildHessianMatrix(Q, R, param_.state_cost_exponential, param_.input_cost_exponential);
 
@@ -1085,7 +1085,7 @@ public:
         quad_acc = (quad_velocities[i] - quad_velocities[i-1]) / t_step;
         quad_jerk = (quad_acc - last_acc) / t_step;
         last_acc = quad_acc;
-        if (i == 1)
+        if (i == 1)   // 保存第二步的值供下次调用使用
         {
           last_des_acc = quad_acc;
           last_des_jerk = quad_jerk;
@@ -1129,6 +1129,7 @@ public:
 
       q.normalize();
       last_q = q;
+      // 定义误差状态 MPC 的"零误差点"（参考轨迹起点）
       if (i == 0)
       {
         Eigen::VectorXd x_des_start(nstate);
@@ -1143,11 +1144,12 @@ public:
       
       body_z = q.toRotationMatrix() * Eigen::Vector3d(0, 0, 1);
       
+      // 生成 Fx[i], Fu[i], u_lb[i], u_ub[i]
       setStateMatricesandBounds(i, q, omg, t_step, thracc);
 
-      // ROS_INFO_THROTTLE(2.0, "Ref step %d: omg = [%f, %f, %f], yaw = %f, thracc = %f", 
-      //                   i,
-      //                   omg(0), omg(1), omg(2), yaw, thracc);
+      ROS_INFO_THROTTLE(2.0, "Ref step %d: omg = [%f, %f, %f], yaw = %f, thracc = %f", 
+                        i,
+                        omg(0), omg(1), omg(2), yaw, thracc);
     }
     mpc_wrapper_.buildConstraintMatrix(Fx, Fu);
     mpc_wrapper_.buildConstraintVectors(u_lb, u_ub);

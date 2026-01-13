@@ -4,7 +4,7 @@ takeoff_land_speed: 0.2
 ref_txt:
     enable: true
     time_step: 0.01
-    ref_filename: "/traj/circle.txt"
+    ref_filename: "/traj/circle_horizon.txt"
 
 hover_percentage: 0.705
 
@@ -16,29 +16,36 @@ MPC_params:
     step_T: 0.01
     # Cost on states
     # 8 steps
-    # Q_pos_xy:   5000.0    # Cost for horizontal positon error //default: 200     0.5 
-    # Q_pos_z:  5000.0    # Cost for horizontal positon error //default: 200     0.5 
-    # Q_attitude_rp:  40.0   # Cost for attitude error           //default: 50     0.1
-    # Q_attitude_yaw:  40.0    # Cost for attitude error           //default: 50     0.1
-    # Q_velocity:  40.0   # Cost for velocity error           //default: 10    0.05 
+    # Q_pos_x:   5000.0    # Cost for x positon error
+    # Q_pos_y:   5000.0    # Cost for y positon error
+    # Q_pos_z:   5000.0    # Cost for z positon error
+    # Q_attitude_roll:  40.0   # Cost for roll attitude error
+    # Q_attitude_pitch:  40.0   # Cost for pitch attitude error
+    # Q_attitude_yaw:  40.0    # Cost for yaw attitude error
+    # Q_velocity:  40.0   # Cost for velocity error
     # 20 steps
-    Q_pos_xy:   1000.0    # Cost for horizontal positon error //default: 200     0.5 
-    Q_pos_z:  800.0    # Cost for horizontal positon error //default: 200     0.5 
-    Q_attitude_rp:  40.0   # Cost for attitude error           //default: 50     0.1
-    Q_attitude_yaw:  40.0    # Cost for attitude error           //default: 50     0.1
-    Q_velocity:  20.0   # Cost for velocity error           //default: 10    0.05
+    Q_pos_x:   1000.0    # Cost for x positon error
+    Q_pos_y:   1000.0    # Cost for y positon error
+    Q_pos_z:   800.0     # Cost for z positon error
+    Q_attitude_roll:  40.0   # Cost for roll attitude error
+    Q_attitude_pitch:  40.0   # Cost for pitch attitude error
+    Q_attitude_yaw:  40.0    # Cost for yaw attitude error
+    Q_velocity:  20.0   # Cost for velocity error
     # 60 steps
-    # Q_pos_xy:   8.0    # Cost for horizontal positon error //default: 200     0.5 
-    # Q_pos_z:  100.0    # Cost for horizontal positon error //default: 200     0.5 
-    # Q_attitude_rp:  10.0   # Cost for attitude error           //default: 50     0.1
-    # Q_attitude_yaw:  10.0    # Cost for attitude error           //default: 50     0.1
-    # Q_velocity:  0.1   # Cost for velocity error           //default: 10    0.05
+    # Q_pos_x:   8.0      # Cost for x positon error
+    # Q_pos_y:   8.0      # Cost for y positon error
+    # Q_pos_z:   100.0    # Cost for z positon error
+    # Q_attitude_roll:  10.0   # Cost for roll attitude error
+    # Q_attitude_pitch:  10.0   # Cost for pitch attitude error
+    # Q_attitude_yaw:  10.0    # Cost for yaw attitude error
+    # Q_velocity:  0.1    # Cost for velocity error
     # Cost on inputs
-    R_thrust:    0.5  # Cost on thrust input            //default: 1
-    R_pitchroll:  1.2      # Cost on pitch and roll rate
-    R_yaw:        0.6      # Cost on yaw rate
-    state_cost_exponential: 0.0     # Scaling for state costs
-    input_cost_exponential: 0.0     # scaling for input costs
+    R_thrust:    0.5  # Cost on thrust input
+    R_roll:      1.2  # Cost on roll rate
+    R_pitch:     1.2  # Cost on pitch rate
+    R_yaw:       1.0  # Cost on yaw rate
+    state_cost_exponential: 0.0     # Scaling for state costs  // default: 0.5
+    input_cost_exponential: 0.0     # scaling for input costs   // default: 0.5
     # Limits for inputs
     max_bodyrate_xy:    6.0       #  [rad/s]
     max_bodyrate_z:     4.0       #  [rad/s]
