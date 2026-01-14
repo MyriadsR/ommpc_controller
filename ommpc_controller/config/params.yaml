@@ -1,4 +1,4 @@
-takeoff_height: 0.8
+takeoff_height: 1.5
 takeoff_land_speed: 0.2
 
 ref_txt:
@@ -47,7 +47,8 @@ MPC_params:
     state_cost_exponential: 0.0     # Scaling for state costs  // default: 0.5
     input_cost_exponential: 0.0     # scaling for input costs   // default: 0.5
     # Limits for inputs
-    max_bodyrate_xy:    6.0       #  [rad/s]
-    max_bodyrate_z:     4.0       #  [rad/s]
+    max_bodyrate_x:     6.0       #  [rad/s] - roll rate limit
+    max_bodyrate_y:     6.0       #  [rad/s] - pitch rate limit
+    max_bodyrate_z:     4.0       #  [rad/s] - yaw rate limit
     min_thrust:         1.0       #  [m/s^2]
     max_thrust:         30.0      #  [m/s^2]

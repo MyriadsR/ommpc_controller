@@ -485,7 +485,8 @@ public:
         read_essential_param(nh, "MPC_params/R_yaw", param_.R_yaw);
         read_essential_param(nh, "MPC_params/min_thrust", param_.min_thrust);
         read_essential_param(nh, "MPC_params/max_thrust", param_.max_thrust);
-        read_essential_param(nh, "MPC_params/max_bodyrate_xy", param_.max_bodyrate_xy);
+        read_essential_param(nh, "MPC_params/max_bodyrate_x", param_.max_bodyrate_x);
+        read_essential_param(nh, "MPC_params/max_bodyrate_y", param_.max_bodyrate_y);
         read_essential_param(nh, "MPC_params/max_bodyrate_z", param_.max_bodyrate_z);
         read_essential_param(nh, "MPC_params/state_cost_exponential", param_.state_cost_exponential);
         read_essential_param(nh, "MPC_params/input_cost_exponential", param_.input_cost_exponential);
