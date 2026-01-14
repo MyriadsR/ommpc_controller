@@ -697,7 +697,7 @@ struct Parameter_t
   double Q_pos_x, Q_pos_y, Q_pos_z, Q_velocity, Q_attitude_roll, Q_attitude_pitch, Q_attitude_yaw;
   double R_thrust, R_roll, R_pitch, R_yaw;
   double state_cost_exponential, input_cost_exponential;
-  double max_bodyrate_xy, max_bodyrate_z, min_thrust, max_thrust;
+  double max_bodyrate_x, max_bodyrate_y, max_bodyrate_z, min_thrust, max_thrust;
 
   bool use_fix_yaw, use_trajectory_ending_pos;
 
@@ -874,6 +874,36 @@ public:
     return;
   }
 
+  void computeFlatInputwithRotationMatrix(const Eigen::Vector3d &thr_acc,  // 期望加速度向量 (包含重力补偿)
+                                  const Eigen::Vector3d &jer,
+                                  const double &yaw,
+                                  const double &yawd,       // 期望偏航角速度
+                                  const Eigen::Quaterniond &att_est,  // 估计姿态 (奇异性时的备用值)
+                                  Eigen::Quaterniond &att,
+                                  Eigen::Vector3d &omg) const
+  {
+    ROS_WARN_ONCE("Using Rotation Matrix method for flat output to input conversion.");
+    static Eigen::Vector3d omg_old(0.0, 0.0, 0.0);
+    Eigen::Vector3d z_des = thr_acc.normalized();
+    Eigen::Vector3d x_c(cos(yaw), sin(yaw), 0.0);
+    Eigen::Vector3d y_des = z_des.cross(x_c).normalized();
+    Eigen::Vector3d x_des = y_des.cross(z_des);
+    Eigen::Matrix3d R;
+    R.col(0) = x_des;
+    R.col(1) = y_des;
+    R.col(2) = z_des;
+    att = Eigen::Quaterniond(R);
+
+    Eigen::Vector3d h_omg = (jer - jer.dot(z_des) * z_des) / thr_acc.norm();
+
+    omg(0) = -y_des.dot(h_omg);
+    omg(1) = x_des.dot(h_omg);
+    omg(2) = yawd * Eigen::Vector3d::UnitZ().dot(z_des);
+
+    omg_old = omg;
+    return;
+  }
+
   bool execMPC(const Odom_Data_t &odom,
               Controller_Output_t &u)
   {
@@ -1003,13 +1033,13 @@ public:
     Fu[i].makeCompressed();
 
     u_ub[i] << thracc - param_.min_thrust, 
-                param_.max_bodyrate_xy + omg(0),
-                param_.max_bodyrate_xy + omg(1),
-                param_.max_bodyrate_z + omg(2); // lower
+                param_.max_bodyrate_x + omg(0),
+                param_.max_bodyrate_y + omg(1),
+                param_.max_bodyrate_z + omg(2); // upper
     u_lb[i] << -(param_.max_thrust - thracc), 
-                omg(0) - param_.max_bodyrate_xy,
-                omg(1) - param_.max_bodyrate_xy,
-                omg(2) - param_.max_bodyrate_z; // upper 
+                omg(0) - param_.max_bodyrate_x,
+                omg(1) - param_.max_bodyrate_y,
+                omg(2) - param_.max_bodyrate_z; // lower 
     // std::cout << Fx[i] << std::endl;
     // std::cout << Fu[i] << std::endl;
     // std::cout << u_ub[i] << std::endl;
@@ -1032,6 +1062,7 @@ public:
     
     // des_acc, des_jerk, des_yaw, des_yawdot, des_q (when fail to calculate proper q), out_q, out_omg
     computeFlatInputwithHopfFibration(des_acc_in_world, Eigen::Vector3d::Zero(), yaw, 0, identity_q, q, omg);
+    // computeFlatInputwithRotationMatrix(des_acc_in_world, Eigen::Vector3d::Zero(), yaw, 0, identity_q, q, omg);
     double t_step = param_.step_T;
     for (int i = 0; i < nstep; ++i)
     {
@@ -1125,6 +1156,7 @@ public:
       // des_acc, des_jerk, des_yaw, des_yawdot, des_q (assign to q when fail to calculate proper q), out_q, out_omg
       // if there's significant discontinuous in the txt traj (especially at the end of it), don't use jerk!
       computeFlatInputwithHopfFibration(des_acc_in_world, Eigen::Vector3d::Zero(), yaw, yaw_dot, last_q, q, omg);
+      // computeFlatInputwithRotationMatrix(des_acc_in_world, Eigen::Vector3d::Zero(), yaw, yaw_dot, last_q, q, omg);
       // computeFlatInputwithHopfFibration(des_acc_in_world, quad_jerk, yaw, yaw_dot, last_q, q, omg);
 
       q.normalize();
