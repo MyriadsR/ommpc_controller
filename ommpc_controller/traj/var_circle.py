@@ -6,19 +6,22 @@ import numpy as np
 import math
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import os
 
 # Parameters
+# Accelerating stress reference, separate from the validated fixed-speed flip
+# and helix trajectories. Check its required centripetal force for each vehicle.
 sample_time = 0.01             # seconds
-duration = 60                  # seconds
+duration = 80                  # seconds
 
 r = 1.2
 # Initial and final velocities
 v_initial = 0.5
-v_final = 2.0
+v_final = 10.0
 
 x0 = r                     
 y0 = 0
-z0 = 0.8
+z0 = 1.5
 
 clockwise = True
 factor = -1 if clockwise else 1
@@ -36,7 +39,7 @@ angle_array = np.zeros(num_points)
 
 # Generate trajectory
 for i, time in enumerate(t):
-    # Calculate current velocity (linear from 0.5 to 2.0)
+    # Calculate current velocity (linear from v_initial to v_final)
     v_current = v_initial + (v_final - v_initial) * (time / duration)
     v_magnitude[i] = v_current
     
@@ -67,8 +70,10 @@ for i, time in enumerate(t):
 # Calculate velocity magnitude (for verification)
 calculated_v_magnitude = np.sqrt(traj[:, 3]**2 + traj[:, 4]**2)
 
-# write to txt
-np.savetxt('circle.txt', traj, fmt='%f')
+# write to txt (save in the same directory as this script)
+script_dir = os.path.dirname(os.path.abspath(__file__))
+output_path = os.path.join(script_dir, 'circle_horizon.txt')
+np.savetxt(output_path, traj, fmt='%f')
 
 # Create visualization plots
 fig = plt.figure(figsize=(15, 10))

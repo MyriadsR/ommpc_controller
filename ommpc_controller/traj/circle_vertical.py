@@ -9,13 +9,15 @@ from mpl_toolkits.mplot3d import Axes3D
 import os
 
 # Parameters
+# Accelerating stress reference: these speeds can exceed the vehicle's thrust
+# envelope. The bounded inverted-flight example is generate_vertical_flip.py.
 sample_time = 0.01             # seconds
-duration = 60                  # seconds
+duration = 100                  # seconds
 
 r = 1.2
 # Initial and final velocities
 v_initial = 0.5
-v_final = 2.0
+v_final = 13.0
 
 x0 = r                     
 y0 = 0
@@ -37,7 +39,7 @@ angle_array = np.zeros(num_points)
 
 # Generate trajectory
 for i, time in enumerate(t):
-    # Calculate current velocity (linear from 0.5 to 2.0)
+    # Calculate current velocity (linear from v_initial to v_final)
     v_current = v_initial + (v_final - v_initial) * (time / duration)
     v_magnitude[i] = v_current
     
