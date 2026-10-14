@@ -44,6 +44,7 @@ target_link_libraries(${PROJECT_NAME}_example_node
 )
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/px4_odometry_math_test.py)
   catkin_add_gtest(text_trajectory_test test/text_trajectory_test.cpp)
   catkin_add_gtest(continuous_flatness_test test/continuous_flatness_test.cpp)
   catkin_add_gtest(thrust_model_test test/thrust_model_test.cpp)

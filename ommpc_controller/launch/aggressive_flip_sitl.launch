@@ -1,0 +1,23 @@
+<launch>
+  <arg name="ground_truth_feedback" default="true"/>
+  <arg name="gui" default="true"/>
+  <arg name="synchronized_feedback" default="false"/>
+  <arg name="ref_filename" default="/traj/vertical_flip.traj"/>
+  <!-- Ideal feedback and PX4 estimated feedback are mutually exclusive paths;
+       synchronized_feedback applies only when ground_truth_feedback is false. -->
+  <!-- Match the Gazebo Classic GPS plugin's measured ~120 ms delay. -->
+  <arg name="ekf_gps_delay_ms" default="120"/>
+  <env name="PX4_PARAM_EKF2_GPS_DELAY" value="$(arg ekf_gps_delay_ms)"/>
+  <include file="$(find px4)/launch/mavros_posix_sitl.launch">
+    <arg name="vehicle" value="iris"/>
+    <arg name="sdf" value="$(find ommpc_controller)/sim/iris_agile.sdf"/>
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="interactive" value="false"/>
+  </include>
+  <node if="$(arg ground_truth_feedback)" pkg="ommpc_controller" type="ground_truth_odometry.py" name="flip_ground_truth_odometry" output="screen"/>
+  <node if="$(eval arg('synchronized_feedback') and not arg('ground_truth_feedback'))" pkg="ommpc_controller" type="px4_synchronized_odometry.py" name="px4_synchronized_odometry" output="screen"/>
+  <include file="$(find ommpc_controller)/launch/flip_controller.launch">
+    <arg name="ref_filename" value="$(arg ref_filename)"/>
+    <arg name="odometry_topic" value="$(eval '/flip/ground_truth/odom' if arg('ground_truth_feedback') else ('/ommpc_controller/px4_synced_odom' if arg('synchronized_feedback') else '/mavros/local_position/odom'))"/>
+  </include>
+</launch>
