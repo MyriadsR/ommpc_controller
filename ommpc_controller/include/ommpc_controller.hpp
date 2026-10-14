@@ -10,6 +10,7 @@
 #include <nav_msgs/Odometry.h>
 #include "polynomial_trajectory.h" // for traj reading required by NMPC
 #include "so3_math.h"
+#include "continuous_flatness.h"
 #include <queue>
 #include <deque>
 #include <traj_utils/PolyTraj.h>  // for ego_planner_v2
@@ -267,6 +268,7 @@ public:
     free(P_indptr_);
   }
 
+  // 设置初始误差，上下界一样说明是等式约束
   void setInitValue(const Eigen::VectorXd &x0)
   {
     for (int i = 0; i < nx; ++i)
@@ -692,6 +694,10 @@ private:
 
 struct Parameter_t
 {
+  double min_normalized_thrust = 0.04, max_normalized_thrust = 0.9;
+  bool continuous_attitude_reference = false, estimate_thrust_online = true;
+  double thrust_model_power = 1.0, thrust_model_offset = 0.0, thrust_model_gain = 0.0;
+  double min_tracking_thrust = 0.0; // optional torque-authority reserve during trajectories
   double step_T;
   double hover_percent;
   double Q_pos_x, Q_pos_y, Q_pos_z, Q_velocity, Q_attitude_roll, Q_attitude_pitch, Q_attitude_yaw;
@@ -712,6 +718,8 @@ class MpcController
 {
 private:
   const double gravity_ = 9.81;
+  Eigen::Quaterniond reference_attitude_ = Eigen::Quaterniond::Identity();
+  bool reference_valid_ = true;
 
   // MPC param wrapper
 	MpcWrapper mpc_wrapper_;
@@ -812,8 +820,11 @@ public:
   void init(Parameter_t param)
   {
     param_ = param;
-    thr2acc = gravity_ / param_.hover_percent;
+    thr2acc = param_.thrust_model_gain > 0.0 ? param_.thrust_model_gain
+        : gravity_ / std::pow(param_.hover_percent + param_.thrust_model_offset, param_.thrust_model_power);
     P = 1e6;
+    last_yaw_ = 0.0;
+    last_yaw_dot_ = 0.0;
 
     // MPC Controller
     ROS_WARN("mpc time_step: %f", param_.step_T);
@@ -851,6 +862,11 @@ public:
                                   Eigen::Vector3d &omg) const
   {
     static Eigen::Vector3d omg_old(0.0, 0.0, 0.0);
+    if (!thr_acc.allFinite() || thr_acc.norm() <= 0.1)
+    {
+      att = att_est; omg = omg_old;
+      return;
+    }
     Eigen::Vector3d abc = thr_acc.normalized();
     double a = abc(0), b = abc(1), c = abc(2);
     Eigen::Vector3d abc_dot = (thr_acc.dot(thr_acc) * Eigen::MatrixXd::Identity(3, 3) - thr_acc * thr_acc.transpose()) / thr_acc.norm() / thr_acc.squaredNorm() * jer;
@@ -867,8 +883,7 @@ public:
       omg(2) = (b * a_dot - a * b_dot) / (1 + c) + yawd;
     }else{
       std::cout << "Near singularity!!!!!" << std::endl;
-      omg = omg_old;
-      att = att_est;
+      continuousFlatnessReference(thr_acc, jer, att_est, att, omg);
     }
     omg_old = omg;
     return;
@@ -907,6 +922,7 @@ public:
   bool execMPC(const Odom_Data_t &odom,
               Controller_Output_t &u)
   {
+    if (!reference_valid_) return false;
     const clock_t start = clock();
 
     // 1. set init error state of OMMPC
@@ -946,15 +962,12 @@ public:
     double thrustacc = u_des_start(0) - solution.delta_u[0](0);
     // std::cout << thrustacc << std::endl;
     double normalized_thrust;
-    normalized_thrust = thrustacc / thr2acc;
+    normalized_thrust = accelerationToThrust(thrustacc);
     u.thrust = normalized_thrust;
     // std::cout << thrustacc << u.bodyrates.transpose() << std::endl;
     // std::cout << std::endl;
 
-    // Used for thrust-accel mapping estimation
-    timed_thrust.push(std::pair<ros::Time, double>(ros::Time::now(), u.thrust));
-    while (timed_thrust.size() > 100)
-      timed_thrust.pop();
+    ROS_INFO_THROTTLE(2.0, "Thrust model: gain = %.3f, requested = %.3f", thr2acc, u.thrust);
 
     const clock_t end = clock();
     timing_feedback_ = 0.9 * timing_feedback_ + 0.1 * double(end - start) / CLOCKS_PER_SEC;
@@ -968,7 +981,8 @@ public:
                 const Eigen::Quaterniond &q,  // 参考姿态四元数
                 const Eigen::Vector3d &omg,     // 参考角速度
                 const double t_step,          // 时间步长
-                const double thracc)          // 参考推力加速度
+                const double thracc,          // 参考推力加速度
+                const double tracking_thrust_floor = 0.0)
   {
     Fx[i] = Eigen::SparseMatrix<double>(nx, nx);
     Fu[i] = Eigen::SparseMatrix<double>(nx, nu);
@@ -1032,11 +1046,17 @@ public:
     Fu[i].setFromTriplets(tripletList.begin(), tripletList.end());
     Fu[i].makeCompressed();
 
-    u_ub[i] << thracc - param_.min_thrust, 
+    // delta_u = u_reference - u_actual. Include the limits applied by MAVROS
+    // publishing, so OSQP does not rely on thrust that will be clipped later.
+    const double thrust_min = std::max(std::max(param_.min_thrust, tracking_thrust_floor),
+        thrustToAcceleration(param_.min_normalized_thrust));
+    const double thrust_max = std::max(thrust_min,
+        std::min(param_.max_thrust, thrustToAcceleration(param_.max_normalized_thrust)));
+    u_ub[i] << thracc - thrust_min,
                 param_.max_bodyrate_x + omg(0),
                 param_.max_bodyrate_y + omg(1),
                 param_.max_bodyrate_z + omg(2); // upper
-    u_lb[i] << -(param_.max_thrust - thracc), 
+    u_lb[i] << -(thrust_max - thracc),
                 omg(0) - param_.max_bodyrate_x,
                 omg(1) - param_.max_bodyrate_y,
                 omg(2) - param_.max_bodyrate_z; // lower 
@@ -1051,6 +1071,7 @@ public:
   // Eigen::Vector4d(px, py, pz, yaw)
   void setHoverReference(const Eigen::Vector4d &quad_pose)
   {
+    reference_valid_ = true;
     double yaw = quad_pose(3);
     // std::cout << " yaw = " << yaw
     //           << " pos = [" << quad_pos(0) << "," << quad_pos(1) << "," << quad_pos(2) << std::endl;
@@ -1063,6 +1084,7 @@ public:
     // des_acc, des_jerk, des_yaw, des_yawdot, des_q (when fail to calculate proper q), out_q, out_omg
     computeFlatInputwithHopfFibration(des_acc_in_world, Eigen::Vector3d::Zero(), yaw, 0, identity_q, q, omg);
     // computeFlatInputwithRotationMatrix(des_acc_in_world, Eigen::Vector3d::Zero(), yaw, 0, identity_q, q, omg);
+    reference_attitude_ = q;
     double t_step = param_.step_T;
     for (int i = 0; i < nstep; ++i)
     {
@@ -1084,108 +1106,83 @@ public:
     mpc_wrapper_.setDesiredStart(x_des_start, u_des_start);
   }
 
-  // Case 2: TXT reference
-  void setTextReference(const std::vector<Eigen::Vector3d> &quad_positions, 
-                                  const std::vector<Eigen::Vector3d> &quad_velocities,
-                                  const Odom_Data_t &odom, 
-                                  const double start_yaw,
-                                  const std::vector<double> &yaws)
+  // Case 2: sampled references with explicit, consistent derivatives.
+  void setTextReference(const std::vector<Eigen::Vector3d> &positions,
+                        const std::vector<Eigen::Vector3d> &velocities,
+                        const std::vector<Eigen::Vector3d> &accelerations,
+                        const std::vector<Eigen::Vector3d> &jerks,
+                        const Odom_Data_t &odom,
+                        const double start_yaw,
+                        const std::vector<double> &yaws,
+                        bool tracking_reference = false)
   {
-    if (quad_positions.size() != nstep + 1 || yaws.size() != nstep + 1 || quad_velocities.size() != nstep + 1)
-      ROS_ERROR("Read reference Error!!");
-    static Eigen::Vector3d last_quad_velocity = Eigen::Vector3d::Zero();
-    static Eigen::Vector3d last_des_acc = Eigen::Vector3d::Zero(), last_acc;
-    static Eigen::Vector3d last_des_jerk = Eigen::Vector3d::Zero();
+    ROS_ASSERT(positions.size() == nstep + 1 && velocities.size() == nstep + 1
+        && accelerations.size() == nstep + 1 && jerks.size() == nstep + 1
+        && yaws.size() == nstep + 1);
     const double t_step = param_.step_T;
-    Eigen::Quaterniond last_q = odom.q;
-    Eigen::Vector3d body_z = last_q.toRotationMatrix() * Eigen::Vector3d(0, 0, 1);
-
+    reference_valid_ = true;
+    Eigen::Quaterniond last_q = reference_attitude_;
+    const double saved_yaw_dot = last_yaw_dot_;
+    double next_yaw_dot = saved_yaw_dot;
+    last_yaw_ = start_yaw;
     for (int i = 0; i < nstep; ++i)
     {
-      // Eigen::Vector3d quad_position = quad_positions.at(i);
-      Eigen::Vector3d quad_velocity = quad_velocities.at(i);
-      Eigen::Vector3d quad_acc, quad_jerk;
-      if (i == 0)
+      double yaw = 0.0, yaw_dot = 0.0;
+      if (!param_.use_fix_yaw)
       {
-        quad_acc = last_des_acc;
-        last_acc = quad_acc;
-        quad_jerk = last_des_jerk;
+        Eigen::Vector3d velocity = velocities[i];
+        calculate_yaw(velocity, t_step, yaw, yaw_dot);
+        if (i == 0) next_yaw_dot = yaw_dot;
       }
-      else
-      {
-        quad_acc = (quad_velocities[i] - quad_velocities[i-1]) / t_step;
-        quad_jerk = (quad_acc - last_acc) / t_step;
-        last_acc = quad_acc;
-        if (i == 1)   // 保存第二步的值供下次调用使用
-        {
-          last_des_acc = quad_acc;
-          last_des_jerk = quad_jerk;
-        }
-      }
-      double yaw, yaw_dot;
-      double thracc;
-      // with acc
-      Eigen::Vector3d des_acc_in_world = Eigen::Vector3d(0, 0, gravity_) + quad_acc;
-      thracc = des_acc_in_world.dot(body_z);
-      // thracc = des_acc_in_world.norm();
+      const Eigen::Vector3d thrust_acc = accelerations[i] + Eigen::Vector3d(0, 0, gravity_);
+      // Collective thrust is a positive magnitude. Projecting onto measured
+      // body Z corrupts the nominal input precisely when attitude tracking lags.
+      const double thracc = thrust_acc.norm();
       Eigen::Quaterniond q;
       Eigen::Vector3d omg;
-      if (param_.use_fix_yaw)
+      if (param_.continuous_attitude_reference)
       {
-          yaw = 0.0;
-          yaw_dot = 0.0;
+        if (!continuousFlatnessReference(thrust_acc, jerks[i], last_q, q, omg))
+        { reference_valid_ = false; return; }
       }
-      else  // directly compute from tangent line of traj
-      {
-        if (i == 0) // reset last_yaw_
-        {
-          last_yaw_ = start_yaw;
-        }
-        calculate_yaw(quad_velocity, t_step, yaw, yaw_dot);
-        if (i == 0)
-        {
-          last_yaw_dot_ = yaw_dot;
-        }
-        // std::cout << yaw << " " << yaw_dot << std::endl;
-      }
-      // else  // use yaw from txt
-      // {
-      //   yaw = yaws.at(i);
-      //   yaw_dot = 0.0;
-      // }
-      // des_acc, des_jerk, des_yaw, des_yawdot, des_q (assign to q when fail to calculate proper q), out_q, out_omg
-      // if there's significant discontinuous in the txt traj (especially at the end of it), don't use jerk!
-      computeFlatInputwithHopfFibration(des_acc_in_world, Eigen::Vector3d::Zero(), yaw, yaw_dot, last_q, q, omg);
-      // computeFlatInputwithRotationMatrix(des_acc_in_world, Eigen::Vector3d::Zero(), yaw, yaw_dot, last_q, q, omg);
-      // computeFlatInputwithHopfFibration(des_acc_in_world, quad_jerk, yaw, yaw_dot, last_q, q, omg);
-
+      else computeFlatInputwithHopfFibration(thrust_acc, jerks[i], yaw, yaw_dot, last_q, q, omg);
       q.normalize();
       last_q = q;
-      // 定义误差状态 MPC 的"零误差点"（参考轨迹起点）
       if (i == 0)
       {
-        Eigen::VectorXd x_des_start(nstate);
-        Eigen::VectorXd u_des_start(nu);
-        x_des_start << quad_positions[i](0), quad_positions[i](1), quad_positions[i](2), 
-                      q.w(), q.x(), q.y(), q.z(), 
-                      quad_velocities[i](0), quad_velocities[i](1), quad_velocities[i](2);
-        u_des_start << thracc, omg(0), omg(1), omg(2);
-        mpc_wrapper_.setDesiredStart(x_des_start, u_des_start);
-        // std::cout << x_des_start.transpose() << std::endl;
+        // Persist the current-time reference only. Caching the last horizon
+        // point would advance the next tick's attitude seed into the future.
+        reference_attitude_ = q;
+        Eigen::VectorXd xdes(nstate), udes(nu);
+        xdes << positions[i], q.w(), q.x(), q.y(), q.z(), velocities[i];
+        udes << thracc, omg;
+        mpc_wrapper_.setDesiredStart(xdes, udes);
       }
-      
-      body_z = q.toRotationMatrix() * Eigen::Vector3d(0, 0, 1);
-      
-      // 生成 Fx[i], Fu[i], u_lb[i], u_ub[i]
-      setStateMatricesandBounds(i, q, omg, t_step, thracc);
-
-      ROS_INFO_THROTTLE(2.0, "Ref step %d: omg = [%f, %f, %f], yaw = %f, thracc = %f", 
-                        i,
-                        omg(0), omg(1), omg(2), yaw, thracc);
+      setStateMatricesandBounds(i, q, omg, t_step, thracc,
+          tracking_reference ? param_.min_tracking_thrust : 0.0);
+      ROS_INFO_THROTTLE(2.0, "Ref step %d: omg = [%f, %f, %f], yaw = %f, thracc = %f",
+          i, omg(0), omg(1), omg(2), yaw, thracc);
     }
+    last_yaw_dot_ = next_yaw_dot;
     mpc_wrapper_.buildConstraintMatrix(Fx, Fu);
     mpc_wrapper_.buildConstraintVectors(u_lb, u_ub);
-    last_quad_velocity = quad_velocities.at(0);
+  }
+
+  const Eigen::Quaterniond &referenceAttitude() const { return reference_attitude_; }
+
+  double thrustToAcceleration(double thrust) const
+  { return thr2acc * std::pow(std::max(0.0, thrust + param_.thrust_model_offset), param_.thrust_model_power); }
+
+  double accelerationToThrust(double acceleration) const
+  { return std::pow(std::max(0.0, acceleration) / thr2acc, 1.0 / param_.thrust_model_power) - param_.thrust_model_offset; }
+
+  void recordSentThrust(const ros::Time &stamp, double thrust)
+  {
+    // Pair IMU samples with the command actually published after saturation;
+    // the unconstrained/requested throttle is not what the motors received.
+    if (!std::isfinite(thrust) || thrust <= 0.0) return;
+    timed_thrust.emplace(stamp, thrust);
+    while (timed_thrust.size() > 100) timed_thrust.pop();
   }
 
   // Case 3: TRAJ reference
@@ -1204,8 +1201,8 @@ public:
     double yaw, yaw_dot;
     Eigen::Vector3d pos_quad, vel_quad, acc_quad, jerk_quad; 
     Eigen::Quaterniond quat, last_quat;
-    last_quat = odom.q;
-    Eigen::Vector3d body_z = last_quat.toRotationMatrix() * Eigen::Vector3d(0, 0, 1);
+    reference_valid_ = true;
+    last_quat = reference_attitude_;
     Eigen::Vector3d omg;
 
     for (int i = 0; i < nstep; i++)
@@ -1251,15 +1248,20 @@ public:
         // todo: support yaw traj
 
         Eigen::Vector3d des_acc_in_world = acc_quad + Eigen::Vector3d(0, 0, gravity_); 
-        // TODO: perform dot product with body z-axis
-        double thracc = des_acc_in_world.dot(body_z);
-        // double thracc = des_acc_in_world.norm();
-        computeFlatInputwithHopfFibration(des_acc_in_world, jerk_quad, yaw, yaw_dot, last_quat, quat, omg);
+        // The polynomial and text paths use the same positive thrust norm.
+        double thracc = des_acc_in_world.norm();
+        if (param_.continuous_attitude_reference)
+        {
+          if (!continuousFlatnessReference(des_acc_in_world, jerk_quad, last_quat, quat, omg))
+          { reference_valid_ = false; return; }
+        }
+        else computeFlatInputwithHopfFibration(des_acc_in_world, jerk_quad, yaw, yaw_dot, last_quat, quat, omg);
 
         last_quat = quat;
 
         if (i == 0)
         {
+          reference_attitude_ = quat;
           Eigen::VectorXd x_des_start(nstate);
           Eigen::VectorXd u_des_start(nu);
           x_des_start << pos_quad(0), pos_quad(1), pos_quad(2), 
@@ -1269,9 +1271,8 @@ public:
           mpc_wrapper_.setDesiredStart(x_des_start, u_des_start);
         }
         
-        body_z = last_quat.toRotationMatrix() * Eigen::Vector3d(0, 0, 1);
 
-        setStateMatricesandBounds(i, last_quat, omg, t_step, thracc);
+        setStateMatricesandBounds(i, last_quat, omg, t_step, thracc, param_.min_tracking_thrust);
         t += t_step;
     }
     mpc_wrapper_.buildConstraintMatrix(Fx, Fu);
@@ -1280,6 +1281,7 @@ public:
 
   void estimateThrustModel(const Eigen::Vector3d &est_a)
   {
+    if (!param_.estimate_thrust_online) return;
     ros::Time t_now = ros::Time::now();
     while (timed_thrust.size() >= 1)
     {
@@ -1299,7 +1301,7 @@ public:
       /***********************************************************/
       /* Recursive least squares algorithm with vanishing memory */
       /***********************************************************/
-      double thr = t_t.second;
+      const double thr = std::pow(t_t.second + param_.thrust_model_offset, param_.thrust_model_power);
       timed_thrust.pop();
       
       /***********************************/
@@ -1311,11 +1313,11 @@ public:
       P = (1 - K * thr) * P / rho2;
       //printf("%6.3f,%6.3f,%6.3f,%6.3f\n", thr2acc, gamma, K, P);
       //fflush(stdout);
-      const double hover_percentage = gravity_ / thr2acc;
+      const double hover_percentage = accelerationToThrust(gravity_);
       if ( hover_percentage > 0.8 || hover_percentage < 0.1 )
       {
-        thr2acc = hover_percentage > 0.8 ? gravity_ / 0.8 : thr2acc;
-        thr2acc = hover_percentage < 0.1 ? gravity_ / 0.1 : thr2acc;
+        const double hover = std::max(0.1, std::min(0.8, hover_percentage));
+        thr2acc = gravity_ / std::pow(hover + param_.thrust_model_offset, param_.thrust_model_power);
       }
     }
   }

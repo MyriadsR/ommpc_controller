@@ -6,9 +6,12 @@
 #include <dynamic_reconfigure/server.h>
 
 #include "ommpc_controller.hpp"
+#include "text_trajectory.h"
+#include <geometry_msgs/PoseStamped.h>
 #include "ommpc_controller/fsm_changeConfig.h"
 
 #include <ros/package.h>
+#include <algorithm>
 #include <fstream>
 
 enum Exec_Traj_State_t
@@ -23,7 +26,7 @@ enum Exec_Traj_State_t
 class OMMPC_EXAMPLE{
 private:
     ros::NodeHandle node_;
-    ros::Publisher cmd_pub_;
+    ros::Publisher cmd_pub_, reference_pub_;
     ros::Subscriber odom_sub_, imu_sub_, state_sub_, mpc_traj_sub_;
     ros::ServiceClient set_mode_client_, arming_client_srv_;
     ros::Timer exec_timer_, read_file_timer_;
@@ -38,14 +41,17 @@ private:
     bool is_command_mode_ = false;
     bool takeoff_enabled_ = false, last_takeoff_enabled_ = false, takeoff_trigger_ = false;
     bool land_enabled_ = false, last_land_enabled_ = false, land_trigger_ = false;
+    bool has_takeoff_ = false, has_land_ = true;
+    int consecutive_failures_ = 0;
     double start_takeoff_land_time;
     bool enu_frame_, vel_in_body_;
     Eigen::Vector4d hover_pose_;
 
-    int line_cnt_ = 0, number_of_steps_ = 0;
-    std::vector<std::vector<double>> test_trajectory_;
+    TextTrajectory text_trajectory_;
+    ros::Time text_start_time_;
     std::vector<Eigen::Vector3d> quad_positions_;
 	std::vector<Eigen::Vector3d> quad_velocities_;
+    std::vector<Eigen::Vector3d> quad_accelerations_, quad_jerks_;
 	std::vector<double> yaws_;
 
     dynamic_reconfigure::Server<ommpc_controller::fsm_changeConfig> state_change_server_;
@@ -60,11 +66,28 @@ private:
     }
 
     void StateCallback(const mavros_msgs::State::ConstPtr &msg){
+        // PX4 can auto-disarm before the LAND FSM reports success. Clear the
+        // maneuver state on that transition so a new flight starts in HOVER.
+        if (state_.armed && !msg->armed)
+        {
+            has_takeoff_ = false;
+            has_land_ = true;
+            exec_traj_state_ = HOVER;
+            if (odom_data_.recv_new_msg)
+            {
+                set_hov_with_odom();
+            }
+        }
+        else if (!state_.armed && msg->armed)
+        {
+            has_land_ = false;
+        }
         state_ = *msg;
     }
 
     void stateChangeCallback(ommpc_controller::fsm_changeConfig &config, uint32_t level){
         last_takeoff_enabled_ = takeoff_enabled_;
+        last_land_enabled_ = land_enabled_;
         land_enabled_ = config.land_enabled;
         is_command_mode_ = config.command_or_hover;
         takeoff_enabled_ = config.takeoff_enabled;
@@ -84,9 +107,12 @@ private:
         cmd.body_rate.x = output.bodyrates(0);
         cmd.body_rate.y = output.bodyrates(1);
         cmd.body_rate.z = output.bodyrates(2);
-        cmd.thrust = output.thrust;
+        // Keep the idle stream at zero; clamp thrust only for active commands.
+        cmd.thrust = output.thrust == 0.0 ? 0.0 : std::max(param_.min_normalized_thrust,
+            std::min(param_.max_normalized_thrust, output.thrust));
         cmd.type_mask = mavros_msgs::AttitudeTarget::IGNORE_ATTITUDE;
         cmd_pub_.publish(cmd);
+        if (state_.armed) ommpc_controller_.recordSentThrust(cmd.header.stamp, cmd.thrust);
     }
 
     void set_hov_with_odom()
@@ -117,11 +143,68 @@ private:
     }
 
     void execFSMCallback(const ros::TimerEvent &e){
-        exec_timer_.stop();
+        if (!ros::ok())
+        {
+            return;
+        }
+
 
         Controller_Output_t u;
-        bool ret;
+        u.bodyrates.setZero();
+        u.thrust = 0.0;
+        bool ret = false;
         ros::Time now_time = ros::Time::now();
+        const bool offboard = state_.mode == mavros_msgs::State::MODE_PX4_OFFBOARD;
+        if (!odom_data_.recv_new_msg)
+        {
+            if (!state_.armed)
+            {
+                send_cmd(u);
+            }
+
+            return;
+        }
+        if (!offboard && exec_traj_state_ != HOVER)
+        {
+            exec_traj_state_ = HOVER;
+            set_hov_with_odom();
+        }
+
+        // Select the new state before executing it, so the transition cycle
+        // also computes a valid control command.
+        if (exec_traj_state_ == HOVER)
+        {
+            if (takeoff_trigger_ && !has_takeoff_)
+            {
+                takeoff_trigger_ = false;
+                if (!offboard)
+                {
+                    ROS_ERROR("[MPCctrl] Not in OFFBOARD mode! Cannot takeoff.");
+                }
+                else if (toggle_arm_disarm(true))
+                {
+                    start_takeoff_land_time = now_time.toSec();
+                    set_hov_with_odom();
+                    exec_traj_state_ = TAKEOFF;
+                    ROS_INFO("[MPCctrl] HOVER --> TAKEOFF");
+                }
+            }
+            else if (land_trigger_ && !has_land_ && state_.armed)
+            {
+                land_trigger_ = false;
+                if (!offboard)
+                {
+                    ROS_ERROR("[MPCctrl] Not in OFFBOARD mode! Cannot land.");
+                }
+                else
+                {
+                    start_takeoff_land_time = now_time.toSec();
+                    set_hov_with_odom();
+                    exec_traj_state_ = LAND;
+                    ROS_INFO("[MPCctrl] HOVER --> LAND");
+                }
+            }
+        }
         // std::cout << "exec_traj_state_:" << exec_traj_state_ << std::endl;
         // std::cout << "traj_queue size:" << trajectory_data_.traj_queue.size() << std::endl;
         // std::cout << "now_time" << now_time << std::endl;
@@ -132,26 +215,8 @@ private:
         {
         case HOVER:
         {
-            if (takeoff_trigger_ && state_.mode == mavros_msgs::State::MODE_PX4_OFFBOARD)
-            {
-                start_takeoff_land_time = ros::Time::now().toSec();
-                if (toggle_arm_disarm(true))
-                {
-                    set_hov_with_odom();
-                    exec_traj_state_ = TAKEOFF;
-                    ROS_INFO("[MPCctrl] Receive the trajectory. HOVER --> TAKEOFF");
-                }
-                ret = true;
-            }
-            else if (land_trigger_ && state_.mode == mavros_msgs::State::MODE_PX4_OFFBOARD)
-            {
-                start_takeoff_land_time = ros::Time::now().toSec();
-                set_hov_with_odom();
-                ret = true;
-                exec_traj_state_ = LAND;
-                ROS_INFO("[MPCctrl] Receive the trajectory. HOVER --> LAND");
-            }
-            else if (now_time >= trajectory_data_.total_traj_start_time &&
+            if (consecutive_failures_ == 0 && state_.armed &&
+                now_time >= trajectory_data_.total_traj_start_time &&
                 now_time <= trajectory_data_.total_traj_end_time &&
                 trajectory_data_.exec_traj == 1 && (!trajectory_data_.traj_queue.empty())
                 && is_command_mode_ && state_.mode == mavros_msgs::State::MODE_PX4_OFFBOARD)
@@ -168,20 +233,28 @@ private:
                 exec_traj_state_ = POLY_TRAJ;
                 ROS_INFO("[MPCctrl] Receive the trajectory. HOVER --> POLY_TRAJ");
             }
-            else if (param_.use_ref_txt && is_command_mode_ && state_.mode == mavros_msgs::State::MODE_PX4_OFFBOARD)
+            else if (consecutive_failures_ == 0 && state_.armed &&
+                param_.use_ref_txt && is_command_mode_ && offboard)
             {
+                text_start_time_ = now_time;
                 exec_traj_state_ = POINTS;
                 ROS_INFO("[MPCctrl] Start executing traj from txt. HOVER --> POINTS");
                 // same as the below
                 double yaw_now = get_yaw_from_quaternion(odom_data_.q);
-                get_txt_des();
-                ommpc_controller_.setTextReference(quad_positions_, quad_velocities_, odom_data_, yaw_now, yaws_);
+                get_txt_des(now_time);
+                ommpc_controller_.setTextReference(quad_positions_, quad_velocities_, quad_accelerations_, quad_jerks_, odom_data_, yaw_now, yaws_, true);
+                publish_text_reference(now_time);
+                ret = ommpc_controller_.execMPC(odom_data_, u);
+            }
+            else if (offboard && state_.armed)
+            {
+                ommpc_controller_.setHoverReference(hover_pose_);
                 ret = ommpc_controller_.execMPC(odom_data_, u);
             }
             else
             {
-                ommpc_controller_.setHoverReference(hover_pose_);
-                ret = ommpc_controller_.execMPC(odom_data_, u);
+                // Maintain the setpoint stream while PX4 enters OFFBOARD.
+                ret = true;
             }
         }
         break;
@@ -190,7 +263,8 @@ private:
         {
             if (now_time < (trajectory_data_.total_traj_start_time) || now_time > trajectory_data_.total_traj_end_time || trajectory_data_.exec_traj != 1 || trajectory_data_.traj_queue.empty())
             {
-                if (param_.use_trajectory_ending_pos && trajectory_data_.exec_traj != -1)
+                if (param_.use_trajectory_ending_pos && trajectory_data_.exec_traj != -1 &&
+                    !trajectory_data_.traj_queue.empty())
                 {
                     // tracking the end point of the trajectory
                     // the hover pose is the end point of the trajectory
@@ -250,8 +324,9 @@ private:
         case POINTS:
         {
             double yaw_now = get_yaw_from_quaternion(odom_data_.q);
-            get_txt_des();
-			ommpc_controller_.setTextReference(quad_positions_, quad_velocities_, odom_data_, yaw_now, yaws_);
+            get_txt_des(now_time);
+			ommpc_controller_.setTextReference(quad_positions_, quad_velocities_, quad_accelerations_, quad_jerks_, odom_data_, yaw_now, yaws_, true);
+            publish_text_reference(now_time);
             ret = ommpc_controller_.execMPC(odom_data_, u);
             if (!is_command_mode_)
             {
@@ -273,18 +348,22 @@ private:
                 quad_positions_[i] = Eigen::Vector3d(
                                     hover_pose_(0),
                                     hover_pose_(1),
-                                    altitude);
-                quad_velocities_[i] = Eigen::Vector3d(0.0, 0.0, param_.takeoff_land_speed);
-                yaws_[i] = hover_pose_(4);
+                                    hover_pose_(2) + altitude);
+                quad_velocities_[i] = Eigen::Vector3d(0.0, 0.0,
+                    altitude < param_.takeoff_height ? param_.takeoff_land_speed : 0.0);
+                quad_accelerations_[i].setZero(); quad_jerks_[i].setZero();
+                yaws_[i] = hover_pose_(3);
             }
             double yaw_now = get_yaw_from_quaternion(odom_data_.q);
-            ommpc_controller_.setTextReference(quad_positions_, quad_velocities_, odom_data_, yaw_now, yaws_);
+            ommpc_controller_.setTextReference(quad_positions_, quad_velocities_, quad_accelerations_, quad_jerks_, odom_data_, yaw_now, yaws_);
             ret = ommpc_controller_.execMPC(odom_data_, u);
-            if (odom_data_.p(2) > param_.takeoff_height)
+            if (odom_data_.p(2) > hover_pose_(2) + param_.takeoff_height)
             {
                 exec_traj_state_ = HOVER;
                 set_hov_with_odom();
                 ROS_INFO("[MPCctrl] TAKEOFF succeeded. TAKEOFF --> HOVER");
+                has_takeoff_ = true;
+                has_land_ = false;
             }
         }
         break;
@@ -292,26 +371,30 @@ private:
         case LAND:
         {
             land_trigger_ = false;
-            const double land_height = -0.5;
+            // Reference is relative to the landing start pose; end below the
+            // local ground origin instead of stopping after a fixed 3 m descent.
+            const double land_height = -hover_pose_(2) - 0.5;
             double altitude;
             auto now_time = ros::Time::now();
             for (int i = 0; i < nstep + 1; ++i)
             {
                 altitude = std::max( 
-                    hover_pose_(2) + (ros::Time::now().toSec() - start_takeoff_land_time + i * param_.step_T) * (-param_.takeoff_land_speed), 
+                    (ros::Time::now().toSec() - start_takeoff_land_time + i * param_.step_T) * (-param_.takeoff_land_speed),
                     land_height);
                 quad_positions_[i] = Eigen::Vector3d(
                                     hover_pose_(0),
                                     hover_pose_(1),
-                                    altitude);
-                quad_velocities_[i] = Eigen::Vector3d(0.0, 0.0, -param_.takeoff_land_speed);
-                yaws_[i] = hover_pose_(4);
+                                    hover_pose_(2) + altitude);
+                quad_velocities_[i] = Eigen::Vector3d(0.0, 0.0,
+                    altitude > land_height ? -param_.takeoff_land_speed : 0.0);
+                quad_accelerations_[i].setZero(); quad_jerks_[i].setZero();
+                yaws_[i] = hover_pose_(3);
             }
             double yaw_now = get_yaw_from_quaternion(odom_data_.q);
-            ommpc_controller_.setTextReference(quad_positions_, quad_velocities_, odom_data_, yaw_now, yaws_);
+            ommpc_controller_.setTextReference(quad_positions_, quad_velocities_, quad_accelerations_, quad_jerks_, odom_data_, yaw_now, yaws_);
             ret = ommpc_controller_.execMPC(odom_data_, u);
             static double last_trial_time = 0; // Avoid too frequent calls
-            if (odom_data_.v.norm() < 0.1 && altitude < -0.4)
+            if (odom_data_.v.norm() < 0.1 && altitude < -1.5)
             {
 				if (now_time.toSec() - last_trial_time > 1.0)
 				{
@@ -320,6 +403,10 @@ private:
 						exec_traj_state_ = HOVER;
                         set_hov_with_odom();
 						ROS_INFO("[MPCctrl] LAND succeeded. LAND --> HOVER");
+                        has_land_ = true;
+                        has_takeoff_ = false;
+                        u.bodyrates.setZero();
+                        u.thrust = 0.0;
 					}
 
 					last_trial_time = now_time.toSec();
@@ -339,84 +426,68 @@ private:
 
         if (ret)
         {
+            consecutive_failures_ = 0;
             send_cmd(u);
         }
         else
         {
+            consecutive_failures_++;
             exec_traj_state_ = HOVER;
+            set_hov_with_odom();
             ROS_ERROR("[MPCctrl] Numerical error!");
         }
-        
-        if(state_.mode == mavros_msgs::State::MODE_PX4_OFFBOARD && state_.armed == true)
+
+        if (exec_traj_state_ != LAND)
+        {
+            land_trigger_ = false;
+        }
+        if (exec_traj_state_ != TAKEOFF)
+        {
+            takeoff_trigger_ = false;
+        }
+
+        if (offboard && state_.armed && imu_data_.recv_new_msg &&
+            exec_traj_state_ != TAKEOFF && exec_traj_state_ != LAND)
         {
             ommpc_controller_.estimateThrustModel(imu_data_.a);
         }
-        exec_timer_.start();
     }
 
     bool readDataFromFile()
     {
-        std::string traj_path = ros::package::getPath("ommpc_controller") + param_.ref_filename;
-        std::ifstream file(traj_path.c_str());
-        std::string line;
-
-        if (file.is_open())
-        {
-            std::cout << "File " << traj_path  << " opened." << std::endl;
-            while (getline(file, line))
-            {
-                number_of_steps_++;
-                std::istringstream linestream(line);
-                std::vector<double> linedata;
-                double number;
-
-                while (linestream >> number)
-                {
-                    linedata.push_back(number);
-                }
-                test_trajectory_.push_back(linedata);
-            }
-            file.close();
-            std::cout << "File closed successfully, " << number_of_steps_ << " lines read." << std::endl;
-            return true;
-        }
-
-        return false;
+        const std::string path = ros::package::getPath("ommpc_controller") + param_.ref_filename;
+        const bool valid = text_trajectory_.load(path, param_.ref_time_step);
+        if (valid) ROS_INFO("Loaded text trajectory: %s, duration %.3f s", path.c_str(), text_trajectory_.duration());
+        else ROS_ERROR("Invalid text trajectory: %s", path.c_str());
+        return valid;
     }
 
-    void get_txt_des()
+    void get_txt_des(const ros::Time &now)
     {
-        for (int cnt = line_cnt_; cnt <= line_cnt_ + nstep; cnt++)
+        // Use elapsed ROS time, not a callback counter: delayed callbacks must
+        // not slow down reference playback relative to the simulated aircraft.
+        const double elapsed = std::max(0.0, (now - text_start_time_).toSec());
+        for (int i = 0; i <= nstep; ++i)
         {
-            int i = cnt - line_cnt_;
-            if (nstep + cnt + 1 < number_of_steps_)
-            {
-                quad_positions_[i] = Eigen::Vector3d(
-                                    test_trajectory_[line_cnt_+i][0],
-                                    test_trajectory_[line_cnt_+i][1],
-                                    test_trajectory_[line_cnt_+i][2]);
-                quad_velocities_[i] = Eigen::Vector3d(
-                                    test_trajectory_[line_cnt_+i][3],
-                                    test_trajectory_[line_cnt_+i][4],
-                                    test_trajectory_[line_cnt_+i][5]);
-                yaws_[i] = test_trajectory_[line_cnt_+i][6];
-            }
-            else
-            {
-                quad_positions_[i] = Eigen::Vector3d(
-                                    test_trajectory_[number_of_steps_ - 1][0],
-                                    test_trajectory_[number_of_steps_ - 1][1],
-                                    test_trajectory_[number_of_steps_ - 1][2]);
-                quad_velocities_[i] = Eigen::Vector3d::Zero();
-                yaws_[i] = test_trajectory_[number_of_steps_ - 1][6];
-            }
+            const auto sample = text_trajectory_.sample(elapsed + i * param_.step_T);
+            quad_positions_[i] = sample.p; quad_velocities_[i] = sample.v;
+            quad_accelerations_[i] = sample.a; quad_jerks_[i] = sample.j;
+            yaws_[i] = sample.yaw;
         }
-        // std::cout << quad_positions_[0] << std::endl;
+    }
 
-        line_cnt_++;
-        if (line_cnt_ > number_of_steps_)
-            line_cnt_ = number_of_steps_;
-        return;
+    void publish_text_reference(const ros::Time &now)
+    {
+        geometry_msgs::PoseStamped reference;
+        reference.header.stamp = now;
+        reference.header.frame_id = "map";
+        reference.pose.position.x = quad_positions_[0].x();
+        reference.pose.position.y = quad_positions_[0].y();
+        reference.pose.position.z = quad_positions_[0].z();
+        const auto &q = ommpc_controller_.referenceAttitude();
+        reference.pose.orientation.w = q.w(); reference.pose.orientation.x = q.x();
+        reference.pose.orientation.y = q.y(); reference.pose.orientation.z = q.z();
+        reference_pub_.publish(reference);
     }
 
     template <typename TName, typename TVal>
@@ -442,6 +513,7 @@ public:
         vel_in_body_ = true;
         exec_traj_state_ = HOVER;
 
+        reference_pub_ = nh.advertise<geometry_msgs::PoseStamped>("reference", 10);
         cmd_pub_ = nh.advertise<mavros_msgs::AttitudeTarget>("/mavros/setpoint_raw/attitude", 10);
         set_mode_client_ = nh.serviceClient<mavros_msgs::SetMode>("mavros/set_mode");
         arming_client_srv_ = nh.serviceClient<mavros_msgs::CommandBool>("/mavros/cmd/arming");
@@ -483,8 +555,17 @@ public:
         read_essential_param(nh, "MPC_params/R_roll", param_.R_roll);
         read_essential_param(nh, "MPC_params/R_pitch", param_.R_pitch);
         read_essential_param(nh, "MPC_params/R_yaw", param_.R_yaw);
+        nh.param("continuous_attitude_reference", param_.continuous_attitude_reference, false);
+        nh.param("thrust_model/power", param_.thrust_model_power, 1.0);
+        nh.param("thrust_model/offset", param_.thrust_model_offset, 0.0);
+        nh.param("thrust_model/gain", param_.thrust_model_gain, 0.0);
+        nh.param("thrust_model/estimate_online", param_.estimate_thrust_online, true);
+        nh.param("MPC_params/min_normalized_thrust", param_.min_normalized_thrust, 0.04);
+        nh.param("MPC_params/max_normalized_thrust", param_.max_normalized_thrust, 0.9);
         read_essential_param(nh, "MPC_params/min_thrust", param_.min_thrust);
         read_essential_param(nh, "MPC_params/max_thrust", param_.max_thrust);
+        nh.param("MPC_params/min_tracking_thrust", param_.min_tracking_thrust, param_.min_thrust);
+        ROS_ASSERT(param_.min_tracking_thrust >= 0.0 && param_.min_tracking_thrust <= param_.max_thrust);
         read_essential_param(nh, "MPC_params/max_bodyrate_x", param_.max_bodyrate_x);
         read_essential_param(nh, "MPC_params/max_bodyrate_y", param_.max_bodyrate_y);
         read_essential_param(nh, "MPC_params/max_bodyrate_z", param_.max_bodyrate_z);
@@ -494,16 +575,25 @@ public:
         read_essential_param(nh, "use_fix_yaw", param_.use_fix_yaw);
         read_essential_param(nh, "use_trajectory_ending_pos", param_.use_trajectory_ending_pos);
 
+        ROS_ASSERT(param_.thrust_model_power >= 1.0 && param_.thrust_model_offset >= 0.0
+            && param_.hover_percent > 0.0 && param_.thrust_model_gain >= 0.0
+            && (!param_.continuous_attitude_reference || param_.use_fix_yaw));
+        ROS_ASSERT(param_.step_T > 0.0 && param_.ref_time_step > 0.0
+            && param_.min_normalized_thrust > 0.0
+            && param_.min_normalized_thrust < param_.max_normalized_thrust
+            && param_.max_normalized_thrust <= 1.0);
         if (param_.use_ref_txt){
             std::cout << "Ref trajectory enabled!" << std::endl;
             if (!readDataFromFile())
-                std::cout << "File input error!" << std::endl;
+                param_.use_ref_txt = false;
         }
 
         quad_positions_.clear();
         quad_positions_.resize(nstep + 1);
         quad_velocities_.clear();
         quad_velocities_.resize(nstep + 1);
+        quad_accelerations_.assign(nstep + 1, Eigen::Vector3d::Zero());
+        quad_jerks_.assign(nstep + 1, Eigen::Vector3d::Zero());
         yaws_.clear();
         yaws_.resize(nstep + 1);
 
@@ -511,7 +601,8 @@ public:
 
         hover_pose_ << 0, 0, 0.0, 0;
 
-        exec_timer_ = nh.createTimer(ros::Duration(0.01), &OMMPC_EXAMPLE::execFSMCallback, this);
+        // Keep the execution period consistent with the model discretization.
+        exec_timer_ = nh.createTimer(ros::Duration(param_.step_T), &OMMPC_EXAMPLE::execFSMCallback, this);
     }
 };
 

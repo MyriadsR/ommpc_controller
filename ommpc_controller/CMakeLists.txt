@@ -42,3 +42,12 @@ target_link_libraries(${PROJECT_NAME}_example_node
   ${catkin_LIBRARIES}
   osqp
 )
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(text_trajectory_test test/text_trajectory_test.cpp)
+  catkin_add_gtest(continuous_flatness_test test/continuous_flatness_test.cpp)
+  catkin_add_gtest(thrust_model_test test/thrust_model_test.cpp)
+  if(TARGET thrust_model_test)
+    target_link_libraries(thrust_model_test ${catkin_LIBRARIES} osqp)
+  endif()
+endif()

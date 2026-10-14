@@ -50,5 +50,8 @@ MPC_params:
     max_bodyrate_x:     6.0       #  [rad/s] - roll rate limit
     max_bodyrate_y:     6.0       #  [rad/s] - pitch rate limit
     max_bodyrate_z:     4.0       #  [rad/s] - yaw rate limit
+    # These bounds are used both by the QP and the command publisher.
+    min_normalized_thrust: 0.04
+    max_normalized_thrust: 0.9
     min_thrust:         1.0       #  [m/s^2]
     max_thrust:         30.0      #  [m/s^2]
