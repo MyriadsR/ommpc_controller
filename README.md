@@ -181,12 +181,12 @@ If reading text trajectories for testing is enabled, after entering command cont
 x-position y-position z-position x-velocity y-velocity z-velocity yaw yaw-rate
 ```
 In the `traj` folder, several scripts are stored for generating text trajectories as needed.  
-Note: The text trajectory must not contain empty lines at the end, otherwise a memory error may occur and lead to a crash!
+Empty lines are ignored; malformed or non-finite rows disable text trajectory execution. Text samples are reconstructed as a smooth C3 trajectory using position and velocity data, so acceleration and jerk feedforward remain consistent with the sampled motion.
 
 **Related parameters**:  
 ref_txt:   
 &emsp; enable: Allows the use of text trajectories. If set to `false`, commands from the planner are received instead.  
-&emsp; time_step: The sampling step size for the text trajectory. Special attention: The step size for MPC and the text reference trajectory must be consistent. This requires ensuring that **this parameter, `MPC_params/step_T` (the MPC step size), and the step in the script generating the text trajectory** are the same!  
+&emsp; time_step: The sampling step size for the text trajectory. This must match the sampling step used by the trajectory generation script. Playback is based on elapsed ROS time and interpolated at `MPC_params/step_T`, which also sets the control timer period.
 &emsp; ref_filename: The path to the text trajectory file, specified as a **relative path** relative to this project.
 
 ### Theory and parameters
@@ -256,3 +256,68 @@ hover_percentage: Used to set the initial value of Ta
 - [SUPER](https://github.com/hku-mars/Super) for providing supporting material including derivation of OMMPC
 - [GCOPTER](https://github.com/ZJU-FAST-Lab/GCOPTER) and [SE(3) Controller](https://github.com/HITSZ-MAS/se3_controller) for providing hints of differential flatness with Hopf fibration
 - [Fast-Drone-250](https://github.com/ZJU-FAST-Lab/Fast-Drone-250/) for providing examples of using Finite State Machine (FSM) to manage states of quadrotors
+
+### Applied thrust limits
+
+`MPC_params/min_normalized_thrust` and `max_normalized_thrust` default to 0.04 and 0.9. The QP intersects the acceleration bounds with these normalized command limits using the current thrust model. Optional `MPC_params/min_tracking_thrust` reserves collective thrust during text/polynomial trajectories; it defaults to the ordinary minimum and does not affect hover, takeoff or landing. Thrust estimation records the final command actually published, including its clamp. Increasing trajectory speed still requires checking the vehicle's physical thrust and angular-rate limits; optimizer success alone does not establish tracking feasibility.
+
+### Inverted vertical-loop simulation
+
+The optional `params_flip.yaml` example uses a continuous quaternion lift of the thrust direction. It transports the transverse body axes from the previous **reference** attitude, retains quaternion sign continuity, and computes angular-rate feedforward from acceleration and jerk. It passes through downward thrust directions without a north-chart singularity. This mode requires `use_fix_yaw: true`; its yaw convention is zero spin about the thrust axis, rather than an absolute Euler yaw constraint on arbitrary 3D paths. Legacy examples retain their original yaw convention by default.
+
+Text references can also provide 14 columns: `px py pz vx vy vz yaw yawdot ax ay az jx jy jz`. Acceleration and jerk are used directly in C3 Hermite interpolation. Existing 8-column references remain supported. The generated example joins hover, three constant-speed vertical circles, and a stop using septic polynomial transitions. It uses a 1.2 m radius and about 4.49 m/s speed, with positive thrust directed downwards at the top of each circle.
+
+Stock Gazebo Iris has insufficient thrust for this example. `sim/generate_agile_model.py` creates a separate experimental SDF with motor thrust constants multiplied by 2.4, preserving stock mass/inertia and PX4 assets. This vehicle is an explicit simulation assumption, not a replica of the paper's aircraft. The example keeps the existing 20-step horizon and uses simulation-tuned feedback weights; it does not reproduce all paper parameters. Its calibrated mapping is `acceleration = gain * (normalized_thrust + offset)^power`. Defaults (`power=1`, `offset=0`, online estimation enabled) preserve the original linear model. Quadratic calibration and disabled estimation apply only to this simulation configuration.
+
+With ROS Noetic, Gazebo Classic, PX4 SITL and MAVROS configured in the shell:
+
+```bash
+python3 <package>/traj/generate_vertical_flip.py
+python3 <package>/sim/generate_agile_model.py --px4 <PX4-Autopilot>
+# Use an isolated ROS_HOME for this experiment, since PX4 stores SITL parameters there.
+export ROS_HOME=<absolute-test-directory>/ros_home
+roslaunch ommpc_controller aggressive_flip_sitl.launch gui:=false
+```
+
+In a second terminal with the same ROS master environment, run the test harness (which arms, flies and lands the simulation):
+
+```bash
+python3 <package>/test/run_tracking_sitl.py --agile --odometry /flip/ground_truth/odom \
+  --trajectory <package>/traj/vertical_flip.traj --output <absolute-test-directory>
+python3 <package>/test/analyze_flip.py <absolute-test-directory> \
+  --metadata <package>/traj/vertical_flip.json
+```
+
+The aggressive launch initializes `EKF2_GPS_DELAY=120` before EKF startup, matching the GPS plugin delay in this Gazebo Classic setup. Override with `ekf_gps_delay_ms:=10` only for comparison; this setting is specific to this simulation chain. Stock launches are unchanged.
+
+The aggressive launch defaults to ideal Gazebo odometry at 100 Hz, comparable to noiseless external motion-capture feedback. It preserves the MAVROS body-velocity convention and is explicitly a simulation-only assumption. To evaluate the full PX4 estimator, launch with `ground_truth_feedback:=false` and omit `--odometry` from the harness. The original examples continue to use MAVROS odometry.
+
+The harness synchronizes PX4 parameters, applies the experimental rate-controller gains before arming, and restores them after disarm. `--agile` must be used only with this experimental vehicle. Analysis records each complete pitch revolution, actual body Z direction at the circle top, position error and solver failures; trajectory completion alone is insufficient to pass the flip check. Raw odometry, IMU, reference quaternions, commands and Gazebo poses are saved for inspection.
+
+### PX4 feedback frequency and synchronization comparison
+
+For the aggressive SITL example, `ground_truth_feedback:=false synchronized_feedback:=true` selects `/ommpc_controller/px4_synced_odom`. This uses position, quaternion and velocity from one PX4 MAVLink `ODOMETRY` packet and keeps MAVROS's synchronized sample timestamp. It does not use Gazebo state, interpolate separate measurements, or extrapolate the state. The adapter targets the installed MAVROS 1.20.x plugin: PX4 emits world NED velocity, while that plugin maps its twist as BODY_FRD. Raw MAVLink frame IDs are checked before correcting velocity to body FLU. Recheck this adapter when upgrading MAVROS; do not substitute the uncorrected `/mavros/odometry/in` twist.
+
+The synchronized adapter additionally requires the Python `numpy` and `pymavlink` modules in the interpreter used by ROS. The generators and offline plots use `numpy` and `matplotlib`.
+
+Use `test/run_tracking_sitl.py --feedback-mode high_rate --feedback-rate 100` to request 100 Hz `LOCAL_POSITION_NED`, `ATTITUDE_QUATERNION` and `ODOMETRY`. For the synchronized launch, use `--feedback-mode synchronized --odometry /ommpc_controller/px4_synced_odom` with the same rate. Other required arguments and `--agile` remain as in the flight test above. These options only change MAVLink streams; achieved frequency must be measured. Start a fresh SITL instance for each comparison: requested stream rates stay active until restart. The default mode remains `baseline`. Unit checks for frame conversion can be run with `python3 <package>/test/px4_odometry_math_test.py`.
+
+### Five-loop vertical helix with roll flips
+
+`traj/generate_vertical_helix.py` generates a trajectory of the same type as paper Fig. 7(a): five vertical circles in the YZ plane, with translation along X and continuous roll inversions. It uses the previously tested 1.2 m radius and 1.68 s circle period, moves 2.4 m along X during the circles, and has C3 entry/exit transitions. It is a constructed simulation reference; the paper does not supply the original reference samples. The entry/exit altitude and vehicle dynamics are specific to this example.
+
+Generate with `python3 <package>/traj/generate_vertical_helix.py`. In a fresh isolated SITL, select it with:
+
+```bash
+roslaunch ommpc_controller aggressive_flip_sitl.launch gui:=true \
+  ground_truth_feedback:=false synchronized_feedback:=true \
+  ref_filename:=/traj/vertical_helix.traj ekf_gps_delay_ms:=120
+python3 <package>/test/run_tracking_sitl.py --agile \
+  --feedback-mode synchronized --feedback-rate 100 \
+  --odometry /ommpc_controller/px4_synced_odom \
+  --trajectory <package>/traj/vertical_helix.traj --output <absolute-test-directory>
+```
+
+`test/analyze_helix.py` checks each complete roll revolution and downward thrust at each circle top, evaluates truth-based position and SO(3) attitude errors after fixed pre-takeoff frame alignment, and produces a figure showing the same quantities as paper Fig. 7(a). Run with `python3 <package>/test/analyze_helix.py <absolute-test-directory> --metadata <package>/traj/vertical_helix.json`. The current harness records the controller's thrust calibration for plotting commands; older saved runs can supply it in a parent `manifest.json`. The launch defaults still select the existing three-loop pitch reference.
+
+The original `circle_vertical.py` and `var_circle.py` currently contain accelerating stress-test settings, with final speeds of 13 m/s and 10 m/s respectively. Their required centripetal thrust can exceed the test vehicle's envelope; they are separate from the bounded fixed-speed flip/helix examples above. A file-by-file explanation of recent changes and validation is in [the change notes](ommpc_controller/doc/recent_changes_20261014.md).

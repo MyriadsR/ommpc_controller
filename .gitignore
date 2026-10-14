@@ -1,2 +1,4 @@
 .vscode/
 ommpc_controller/traj/*.txt
+__pycache__/
+*.py[cod]

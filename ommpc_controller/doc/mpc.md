@@ -270,9 +270,9 @@ $$
 |---------|------|---------|
 | **初始条件** | nx = 9 | $\delta x_0 = x_{\text{init}}$ (等式) |
 | **动力学** | nstep×nx = 180 | $-F_x\delta x_k - F_u\delta u_k + \delta x_{k+1} = 0$ (等式) |
-| **控制界** | 2×nstep×nu = 160 | $u_{\min} \leq \delta u_k \leq u_{\max}$ (不等式) |
+| **控制界** | nstep×nu = 80 | $u_{\min} \leq \delta u_k \leq u_{\max}$ (不等式) |
 
-**总约束数**：9 + 180 + 160 = 349
+**总约束数**：9 + 180 + 80 = 269
 
 ## 详细实现分析
 
@@ -308,10 +308,8 @@ $$
 #### 1.3 控制约束统计 (第424-425行)
 
 ```cpp
-A_nnz_ += 2 * nstep * nu;  // 2×20×4 = 160
+A_nnz_ += nstep * nu;  // 20×4 = 80
 ```
-
-每个控制变量有上下界两个约束，每个约束1个非零元素。
 
 #### 1.4 内存分配 (第427-432行)
 
@@ -413,14 +411,6 @@ for (int k = 0; k < nstep; ++k)
 {
   int uk_offset = k * (nx + nu) + nx;
   
-  // 下界约束: δuk ≥ u_min
-  for (int i = 0; i < nu; ++i)
-  {
-    int col = uk_offset + i;
-    col_nnz[col]++;
-  }
-  
-  // 上界约束: δuk ≤ u_max
   for (int i = 0; i < nu; ++i)
   {
     int col = uk_offset + i;
