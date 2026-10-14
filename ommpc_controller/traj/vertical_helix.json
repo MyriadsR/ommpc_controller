@@ -1,0 +1,30 @@
+{
+  "trajectory_type": "vertical_helix_roll",
+  "paper_reference": "Fig. 7(a), similar geometry; not original reference data",
+  "radius_m": 1.2,
+  "loop_period_s": 1.68,
+  "loop_speed_m_s": 4.487989505128276,
+  "loops": 5,
+  "axial_travel_in_circles_m": -2.4,
+  "axial_speed_m_s": -0.2857142857142857,
+  "entry_s": 1.5,
+  "exit_s": 2.5,
+  "duration_s": 12.4,
+  "time_step_s": 0.01,
+  "minimum_thrust_acceleration_m_s2": 5.477871952430191,
+  "maximum_thrust_acceleration_m_s2": 26.595041498451288,
+  "maximum_body_rate_rad_s": 9.375702239131286,
+  "minimum_height_m": 4.0,
+  "maximum_height_m": 12.975979010256083,
+  "circle_start_position_m": [
+    -0.21428571428571427,
+    0.0,
+    7.365992128846207
+  ],
+  "end_position_m": [
+    -2.9714285714285715,
+    0.0,
+    12.975979010256552
+  ],
+  "c3_joins_verified": true
+}
