@@ -1,0 +1,14 @@
+{
+  "radius_m": 1.2,
+  "loop_speed_m_s": 4.487989505128276,
+  "loop_period_s": 1.68,
+  "entry_s": 1.5,
+  "exit_s": 2.5,
+  "loops": 3,
+  "duration_s": 9.04,
+  "minimum_thrust_acceleration_m_s2": 5.478462134111446,
+  "maximum_thrust_acceleration_m_s2": 26.595041498451288,
+  "maximum_body_rate_rad_s": 9.375759486165169,
+  "minimum_height_m": 4.0,
+  "maximum_height_m": 12.975979010256026
+}

@@ -1,0 +1,41 @@
+takeoff_height: 4.0
+takeoff_land_speed: 0.7
+ref_txt:
+    enable: true
+    time_step: 0.01
+    ref_filename: "/traj/vertical_flip.traj"
+hover_percentage: 0.4208
+use_fix_yaw: true
+use_trajectory_ending_pos: true
+continuous_attitude_reference: true
+# This test vehicle uses omega_motor = 100 + 1000*u, and thrust proportional
+# to omega_motor^2. Gain includes Iris link masses and the 0.015 kg GPS model.
+thrust_model:
+    power: 2.0
+    offset: 0.1
+    gain: 36.17032258064516
+    estimate_online: false
+MPC_params:
+    step_T: 0.01
+    Q_pos_x: 1000.0
+    Q_pos_y: 1000.0
+    Q_pos_z: 1000.0
+    Q_attitude_roll: 80.0
+    Q_attitude_pitch: 80.0
+    Q_attitude_yaw: 80.0
+    Q_velocity: 40.0
+    R_thrust: 0.5
+    R_roll: 6.0
+    R_pitch: 6.0
+    R_yaw: 6.0
+    state_cost_exponential: 0.0
+    input_cost_exponential: 0.0
+    max_bodyrate_x: 14.0
+    max_bodyrate_y: 14.0
+    max_bodyrate_z: 4.0
+    min_normalized_thrust: 0.02
+    max_normalized_thrust: 0.95
+    # Reserve torque authority in fast turns; allow lower thrust for landing.
+    min_tracking_thrust: 5.0
+    min_thrust: 1.0
+    max_thrust: 39.0
